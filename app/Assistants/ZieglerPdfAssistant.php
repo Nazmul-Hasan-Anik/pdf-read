@@ -5,65 +5,65 @@ namespace App\Assistants;
 use Carbon\Carbon;
 use Illuminate\Support\Str;
 
-/**
- * Parser for Ziegler UK booking PDFs.
- * - validateFormat() is static (required by PdfClient).
- * - processLines() parses the lines into schema-ready structure.
- */
 class ZieglerPdfAssistant extends PdfClient
 {
     /**
-     * Decide if this assistant can handle the given PDF.
+     * Validate if this PDF matches Ziegler format.
      */
-    public static function validateFormat($lines)
+    public static function validateFormat(array $lines)
     {
-        $hay = Str::upper(implode("\n", (array) $lines));
+        $hay = Str::upper(implode("\n", $lines));
         return Str::contains($hay, 'ZIEGLER UK LTD')
             || Str::contains($hay, 'ZIEGLER REF')
             || Str::contains($hay, 'PLEASE FIND BELOW THE BOOKING');
     }
 
     /**
-     * Parse PDF lines into structured order data.
+     * Process the lines of a Ziegler PDF and extract order data.
+     * Returns array suitable for createOrder().
      */
     public function processLines(array $lines, ?string $attachment_filename = null)
     {
         $text = implode("\n", $lines);
 
         // ---------- Order ----------
-        $reference = $this->matchOne($text, '/Ziegler\s*Ref\s*([A-Z0-9\/\-\s]+)/i');
+        $reference = $this->matchOne($text, '/Ziegler\s*Ref\s*([^\r\n]+?)(?:\s+Rate\b|$)/i');
         if ($reference) $reference = trim(preg_replace('/\s+/', ' ', $reference));
+
+        $orderReference = $reference ?: ($attachment_filename ?: 'unknown');
 
         $rateRaw  = $this->matchOne($text, '/\bRate\b\s*[€£$]?\s*([0-9\.,]+)/i');
         $amount   = $rateRaw !== null ? (float) str_replace(',', '', $rateRaw) : null;
         $currency = $this->detectCurrency($text) ?? 'EUR';
 
-        // ---------- Stops ----------
         $stops = [];
-        foreach ($this->splitBlocks((array) $lines) as $b) {
+        foreach ($this->splitBlocks($lines) as $b) {
             $blockText = implode("\n", $b['lines']);
 
-            $name     = $this->matchOne($blockText, '/^(?:Collection|Delivery)\s+([^\r\n]+)/i');
-            $localRef = $this->matchOne($blockText, '/\bREF[:\s-]*([A-Z0-9\-\/]+)/i');
+            $name     = $this->matchOne($blockText, '/^(?:Collection|Delivery)\s+([^\r\n]+)/i') ?: null;
+            $localRef = $this->matchOne($blockText, '/\bREF[:\s-]*([A-Z0-9\-\/]+)/i') ?: null;
 
             $date = $this->firstDate($blockText);
-            $slot = $this->matchOne($blockText, '/\b(BOOKED-?\s*\d{1,2}:\d{2}\s*(?:AM|PM)?|\d{1,2}h\d{2}\s*[-–]\s*\d{1,2}h\d{2}|\d{2}:\d{2}\s*[-–]\s*\d{2}:\d{2}|\d{4}\s*[-–]\s*\d{4})\b/i');
+            $slot = $this->matchOne(
+                $blockText,
+                '/\b(BOOKED-?\s*\d{1,2}:\d{2}\s*(?:AM|PM)?|\d{1,2}h\d{2}\s*[-–]\s*\d{1,2}h\d{2}|\d{2}:\d{2}\s*[-–]\s*\d{2}:\d{2}|\d{4}\s*[-–]\s*\d{4})\b/i'
+            );
             [$windowStart, $windowEnd] = $this->parseTimeWindow($slot);
 
             $pallets = $this->matchOneInt($blockText, '/(\d+)\s*PALLETS?/i');
             $weight  = $this->matchOneFloat($blockText, '/(\d{2,3}[.,]?\d{0,3})\s*(?:KG|KGS)\b/i');
 
-            $address = $this->guessAddressLines($b['lines']);
-            $notes   = $this->collectNotes($blockText);
+            $addrGuess = $this->detectAddressLines($b['lines']);
+            $notes     = $this->collectNotes($blockText);
 
             $stops[] = [
                 'type'         => $b['type'],
                 'name'         => $name,
                 'local_ref'    => $localRef,
-                'address'      => $address['full'] ?? null,
-                'postal_code'  => $address['postal'] ?? null,
-                'city'         => $address['city'] ?? null,
-                'country_iso'  => $address['country'] ?? null,
+                'address'      => $addrGuess['full'] ?? null,
+                'postal_code'  => $addrGuess['postal'] ?? null,
+                'city'         => $addrGuess['city'] ?? null,
+                'country_iso'  => $addrGuess['country'] ?? null,
                 'date'         => $date,
                 'window_start' => $windowStart,
                 'window_end'   => $windowEnd,
@@ -73,28 +73,113 @@ class ZieglerPdfAssistant extends PdfClient
             ];
         }
 
+        // ---------- Map to schema-required location arrays ----------
+        [$loading, $destination] = $this->buildSchemaLocationsFromStops($stops);
+
+        // ---------- Cargos ----------
+        $descFromPdf = $this->matchOne($text, '/(?:nature of goods|goods|m\.?\s*nature)\s*[:\-]?\s*([^\r\n]+)/i');
+        $totalPallets = 0; $totalWeight = 0.0; $anyWeight = false;
+        foreach ($stops as $s) {
+            if (!empty($s['pallets']))    $totalPallets += (int)$s['pallets'];
+            if (!empty($s['weight_kg'])) { $totalWeight += (float)$s['weight_kg']; $anyWeight = true; }
+        }
+        $cargos = [[
+            'title'         => $descFromPdf ?: 'General cargo',
+            'package_count' => $totalPallets ?: 0,
+            'package_type'  => $totalPallets ? 'pallet' : 'other',
+            'weight'        => $anyWeight ? $totalWeight : 0,
+        ]];
+
+
+        // ---------- Customer ----------
+        $customer = [
+            'side'    => 'sender',
+            'details' => [
+                'company'       => 'Ziegler UK Ltd',
+            ],
+        ];
+
         // ---------- Terms ----------
         $terms = $this->extractZieglerTerms($text);
 
-        // ---------- Final data ----------
+        // ---------- Compose final data (ALL required present) ----------
         $data = [
-            'order' => [
-                'reference' => $reference,
-                'price'     => [
-                    'amount'   => $amount,
-                    'currency' => $currency,
-                ],
-                'client'    => 'Ziegler UK Ltd',
-            ],
-            'stops' => $stops,
-            'terms' => $terms,
+            'customer'              => $customer,
+            'loading_locations'     => $loading,
+            'destination_locations' => $destination,
+            'cargos'                => $cargos,
+            'order_reference'       => $orderReference,
+            'freight_price'         => $amount ?? 0 ,
+            'freight_currency'      => $currency ?? 'EUR',
+            'comment'               => $terms ? implode(' ', $terms) : ''
         ];
 
         return $this->createOrder($data);
     }
 
-    // ================= HELPER METHODS =================
+    /**
+     * Build schema-compliant locations from parsed stops.
+     */
+    private function buildSchemaLocationsFromStops(array $stops): array
+    {
+        $loading = [];
+        $destination = [];
 
+        foreach ($stops as $s) {
+            $companyAddress = [
+                'company'        => $s['name'] ?: 'Unknown',
+                'street_address' => $s['address'] ?? '',
+            ];
+
+            if (!empty($s['city']) && strlen($s['city']) >= 2) {
+                $companyAddress['city'] = $s['city'];
+            }
+
+            if (!empty($s['postal_code'])) {
+                $companyAddress['postal_code'] = $s['postal_code'];
+            }
+
+            if (!empty($s['country_iso']) && strlen($s['country_iso']) === 2) {
+                $companyAddress['country'] = $s['country_iso'];
+            }
+
+            if (!empty($s['notes'])) {
+                $companyAddress['comment'] = $s['notes'];
+            }
+
+            $time = null;
+            if (!empty($s['date'])) {
+                $from = $s['window_start'] ? "{$s['date']}T{$s['window_start']}:00" : "{$s['date']}T00:00:00";
+                $time = ['datetime_from' => $from];
+                if (!empty($s['window_end'])) {
+                    $time['datetime_to'] = "{$s['date']}T{$s['window_end']}:00";
+                }
+            }
+
+            $loc = ['company_address' => $companyAddress];
+            if ($time) $loc['time'] = $time;
+
+            if (($s['type'] ?? null) === 'pickup') {
+                $loading[] = $loc;
+            } elseif (($s['type'] ?? null) === 'delivery') {
+                $destination[] = $loc;
+            }
+        }
+
+        if (empty($loading)) {
+            $loading[] = ['company_address' => ['company' => 'Unknown', 'street_address' => '']];
+        }
+        if (empty($destination)) {
+            $destination[] = ['company_address' => ['company' => 'Unknown', 'street_address' => '']];
+        }
+
+        return [$loading, $destination];
+    }
+
+
+    /**
+     * Split lines into blocks starting with "Collection" or "Delivery".
+     */
     private function splitBlocks(array $lines): array
     {
         $out = [];
@@ -115,16 +200,23 @@ class ZieglerPdfAssistant extends PdfClient
         return $out;
     }
 
+    /**
+     * Find the first date in d/m/Y format in the text.
+     */
     private function firstDate(string $text): ?string
     {
         if (preg_match('/\b(\d{2})\/(\d{2})\/(\d{4})\b/', $text, $m)) {
             try {
                 return Carbon::createFromFormat('d/m/Y', "{$m[1]}/{$m[2]}/{$m[3]}")->format('Y-m-d');
-            } catch (\Exception $e) { return null; }
+            } catch (\Throwable $e) { return null; }
         }
         return null;
     }
 
+    /**
+     * Parse time window strings like "BOOKED-14:00-16:00" or "14h00-16h00".
+     * Returns [start, end] where either may be null if not found.
+     */
     private function parseTimeWindow(?string $slot): array
     {
         if (!$slot) return [null, null];
@@ -142,6 +234,9 @@ class ZieglerPdfAssistant extends PdfClient
         return [null, null];
     }
 
+    /**
+     * Detect currency symbol in text and return ISO code.
+     */
     private function detectCurrency(string $text): ?string
     {
         if (Str::contains($text, '€')) return 'EUR';
@@ -150,14 +245,25 @@ class ZieglerPdfAssistant extends PdfClient
         return null;
     }
 
+    /**
+     * Regex match helper to get first capturing group or null.
+     */
     private function matchOne(string $text, string $pattern): ?string
     {
         return preg_match($pattern, $text, $m) ? trim($m[1]) : null;
     }
+
+    /**
+     * Regex match helper to get first capturing group as int or null.
+     */
     private function matchOneInt(string $text, string $pattern): ?int
     {
         return preg_match($pattern, $text, $m) ? (int) $m[1] : null;
     }
+
+    /**
+     * Regex match helper to get first capturing group as float or null.
+     */
     private function matchOneFloat(string $text, string $pattern): ?float
     {
         if (!preg_match($pattern, $text, $m)) return null;
@@ -165,30 +271,85 @@ class ZieglerPdfAssistant extends PdfClient
         return is_numeric($v) ? (float) $v : null;
     }
 
-    private function guessAddressLines(array $blockLines): array
+    /**
+     * Detect address lines, postal code, city, country from block lines.
+     */
+    private function detectAddressLines(array $blockLines): array
     {
-        $startFound = false; $addr = [];
+        $addrLines = [];
+        $started = false;
+
         foreach ($blockLines as $ln) {
             $ln = trim($ln);
-            if ($startFound === false && preg_match('/^(Collection|Delivery)\b/i', $ln)) {
-                $startFound = true; continue;
+            if ($ln === '') continue;
+
+            // Start after "Collection" or "Delivery"
+            if (!$started && preg_match('/^(Collection|Delivery)\b/i', $ln)) {
+                $started = true;
+                continue;
             }
-            if ($startFound) {
-                if ($ln === '' || Str::startsWith(Str::upper($ln), ['COLLECTION','DELIVERY'])) break;
-                if (preg_match('/(ROAD|ST|AVE|RUE|DEPOT|LONDON|GB-|FR|[A-Z]{1,2}\d[\w ]+\d[A-Z]{2}|\b\d{5}\b)/i', $ln)) {
-                    $addr[] = $ln;
+
+            if ($started) {
+                // Stop if we hit another header
+                if (preg_match('/^(Collection|Delivery)\b/i', $ln)) break;
+
+                $addrLines[] = $ln;
+            }
+        }
+
+        $full = $addrLines ? implode(', ', $addrLines) : null;
+
+        // --- Extract components ---
+        $postal = null;
+        $city   = null;
+        $country = null;
+
+        // Postal: UK codes (AB12 3CD) or 5-digit zip
+        if ($full) {
+            if (preg_match('/\b([A-Z]{1,2}\d[\w ]+\d[A-Z]{2})\b/i', $full, $m)) {
+                $postal = $m[1];
+            } elseif (preg_match('/\b\d{5}\b/', $full, $m)) {
+                $postal = $m[0];
+            }
+        }
+
+        // City: look for last word before postal
+        if ($full && $postal) {
+            $parts = explode(',', $full);
+            foreach ($parts as $p) {
+                if (stripos($p, $postal) !== false) {
+                    $before = trim(prev($parts));
+                    if ($before && strlen($before) >= 2) {
+                        $city = $before;
+                    }
+                    break;
                 }
             }
         }
-        $full = $addr ? implode(', ', $addr) : null;
-        $postal = $this->matchOne($full ?? '', '/\b([A-Z]{1,2}\d[\w ]+\d[A-Z]{2}|\b\d{5}\b)\b/i');
-        $city   = $this->matchOne($full ?? '', '/([A-Z][A-Z\-\s]+),\s*\d/i');
-        $country = null; $up = Str::upper($full ?? '');
-        if (Str::contains($up, ' FR')) $country = 'FR';
-        if (Str::contains($up, ' GB')) $country = $country ?: 'GB';
-        return compact('full','postal','city','country');
+
+        // Country: try explicit ISO codes or keywords
+        if ($full) {
+            $up = Str::upper($full);
+            if (preg_match('/\bFRANCE\b/i', $full) || Str::contains($up, ' FR')) {
+                $country = 'FR';
+            } elseif (preg_match('/\bUNITED KINGDOM\b/i', $full) || Str::contains($up, ' GB')) {
+                $country = 'GB';
+            } elseif (preg_match('/\bGERMANY\b/i', $full) || Str::contains($up, ' DE')) {
+                $country = 'DE';
+            }
+        }
+
+        return [
+            'full'       => $full,
+            'postal'     => $postal,
+            'city'       => $city,
+            'country'    => $country,
+        ];
     }
 
+    /**
+     * Collect special notes from block text.
+     */
     private function collectNotes(string $blockText): ?string
     {
         $lines = array_filter(array_map('trim', explode("\n", $blockText)));
@@ -201,6 +362,9 @@ class ZieglerPdfAssistant extends PdfClient
         return $notes ? implode('; ', $notes) : null;
     }
 
+    /**
+     * Extract standard Ziegler terms from the text.
+     */
     private function extractZieglerTerms(string $text): array
     {
         $u = Str::upper($text); $terms = [];
