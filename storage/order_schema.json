@@ -1,0 +1,386 @@
+{
+    "type": "object",
+    "properties": {
+        "attachment_filenames": {
+            "type": "array",
+            "description": "names of files that were sourced for this order",
+            "items": {
+                "type": "string"
+            }
+        },
+        "customer": {
+            "type": "object",
+            "description": "details of the company and person placing the transport order",
+            "properties": {
+                "side": {
+                    "type": "string",
+                    "enum": [
+                        "sender",
+                        "receiver",
+                        "none"
+                    ],
+                    "description": "role of customer in the transport order"
+                },
+                "details": {
+                    "$ref": "#/$defs/company_address",
+                    "required": [
+                        "company"
+                    ]
+                }
+            },
+            "required": [
+                "side",
+                "details"
+            ]
+        },
+        "loading_locations": {
+            "type": "array",
+            "description": "descriptions of loading places of the goods / start of leg / sender / dispatcher",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "company_address": {
+                        "$ref": "#/$defs/company_address"
+                    },
+                    "time": {
+                        "$ref": "#/$defs/time_interval",
+                        "description": "date and time when cargo is to be picked up"
+                    }
+                },
+                "required": [
+                    "company_address"
+                ]
+            }
+        },
+        "destination_locations": {
+            "type": "array",
+            "description": "descriptions of delivery places of the goods / end of leg / consignee",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "company_address": {
+                        "$ref": "#/$defs/company_address"
+                    },
+                    "time": {
+                        "$ref": "#/$defs/time_interval",
+                        "description": "date and time when cargo is to be delivered"
+                    }
+                },
+                "required": [
+                    "company_address"
+                ]
+            }
+        },
+        "cargos": {
+            "type": "array",
+            "description": "descriptions of cargo loads",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "title or short description of the cargo"
+                    },
+                    "package_count": {
+                        "type": "integer",
+                        "description": "number of packages in the cargo"
+                    },
+                    "package_type": {
+                        "type": "string",
+                        "description": "type of package (for pallets, assume EPAL unless otherwise specified)",
+                        "enum": [
+                            "carton",
+                            "other",
+                            "120×110",
+                            "98×78",
+                            "EPAL",
+                            "PAL2",
+                            "PAL3",
+                            "PAL6",
+                            "pallet"
+                        ]
+                    },
+                    "number": {
+                        "type": "string",
+                        "description": "number or label that identifies the cargo (tracking number, purchase order number, VIN, etc.)"
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": [
+                            "full",
+                            "partial",
+                            "FCL",
+                            "LCL",
+                            "FTL",
+                            "LTL",
+                            "PTL",
+                            "parcel",
+                            "air shipment",
+                            "container",
+                            "car"
+                        ]
+                    },
+                    "value": {
+                        "type": "number",
+                        "description": "monetary value of the cargo"
+                    },
+                    "currency": {
+                        "type": "string",
+                        "description": "currency of cargo value",
+                        "enum": [
+                            "EUR",
+                            "USD",
+                            "GBP",
+                            "PLN",
+                            "ZAR"
+                        ]
+                    },
+                    "pkg_width": {
+                        "type": "number",
+                        "description": "width in meters of one package"
+                    },
+                    "pkg_length": {
+                        "type": "number",
+                        "description": "length in meters of one package"
+                    },
+                    "pkg_height": {
+                        "type": "number",
+                        "description": "height in meters of one package"
+                    },
+                    "ldm": {
+                        "type": "number",
+                        "description": "total cargo size in loading meters"
+                    },
+                    "volume": {
+                        "type": "number",
+                        "description": "total cargo volume in cubic meters"
+                    },
+                    "weight": {
+                        "type": "number",
+                        "description": "total cargo weight in kg"
+                    },
+                    "chargeable_weight": {
+                        "type": "number",
+                        "description": "chargeable cargo weight in kg"
+                    },
+                    "temperature_min": {
+                        "type": "number",
+                        "description": "minimum cargo temperature in Celsius"
+                    },
+                    "temperature_max": {
+                        "type": "number",
+                        "description": "maximum cargo temperature in Celsius"
+                    },
+                    "temperature_mode": {
+                        "type": "string",
+                        "enum": [
+                            "auto (start / stop)",
+                            "continuous"
+                        ]
+                    },
+                    "adr": {
+                        "type": "boolean",
+                        "description": "cargo has ADR requirements"
+                    },
+                    "extra_lift": {
+                        "type": "boolean",
+                        "description": "cargo has lift"
+                    },
+                    "palletized": {
+                        "type": "boolean",
+                        "description": "cargo is palletized"
+                    },
+                    "manual_load": {
+                        "type": "boolean",
+                        "description": "cargo requires manual loading"
+                    },
+                    "vehicle_make": {
+                        "type": "string",
+                        "description": "make of vehicle transported as cargo"
+                    },
+                    "vehicle_model": {
+                        "type": "string",
+                        "description": "model of vehicle transported as cargo"
+                    }
+                }
+            }
+        },
+        "container": {
+            "type": "object",
+            "description": "description of shipping container",
+            "properties": {
+                "container_number": {
+                    "type": "string",
+                    "description": "container number in ISO 6346 format (AAAA0000000)"
+                },
+                "container_type": {
+                    "type": "string",
+                    "enum": [
+                        "20DV",
+                        "40DV",
+                        "40HC",
+                        "45HC",
+                        "20HCPW",
+                        "40HCPW",
+                        "45HCPW",
+                        "40HR",
+                        "20HR",
+                        "40NOR",
+                        "20NOR",
+                        "22G1",
+                        "22P1",
+                        "22P3",
+                        "22R1",
+                        "22U1",
+                        "22T0",
+                        "22T5",
+                        "2CG1",
+                        "42G1",
+                        "42P1",
+                        "42P3",
+                        "42R1",
+                        "42U1",
+                        "45G1",
+                        "45R1",
+                        "4CG1",
+                        "4EG1"
+                    ]
+                },
+                "booking_reference": {
+                    "type": "string",
+                    "description": "container booking reference number"
+                },
+                "shipping_line": {
+                    "type": "string",
+                    "description": "name of container owner (shipping line)"
+                }
+            }
+        },
+        "order_reference": {
+            "type": "string",
+            "description": "reference number used by the customer to identify the order"
+        },
+        "freight_price": {
+            "type": "number",
+            "description": "suggested total price to be paid for the freight order"
+        },
+        "freight_currency": {
+            "type": "string",
+            "description": "freight price currency",
+            "enum": [
+                "EUR",
+                "USD",
+                "GBP",
+                "PLN",
+                "ZAR"
+            ]
+        },
+        "transport_numbers": {
+            "type": "string",
+            "description": "registration numbers of the vehicle (truck) and trailer used for transport"
+        },
+        "comment": {
+            "type": "string",
+            "description": "free-form additional details"
+        },
+        "incoterms": {
+            "type": "string",
+            "description": "code of the International Commercial Terms preset for this order",
+            "enum": [
+                "CFR",
+                "CIF",
+                "CIP",
+                "CPT",
+                "DAT",
+                "DAP",
+                "DPU",
+                "DDP",
+                "EXW",
+                "FAS",
+                "FCA",
+                "FOB"
+            ]
+        }
+    },
+    "required": [
+        "customer",
+        "loading_locations",
+        "destination_locations",
+        "cargos",
+        "order_reference"
+    ],
+    "$defs": {
+        "company_address": {
+            "type": "object",
+            "properties": {
+                "company": {
+                    "type": "string",
+                    "description": "name of the company"
+                },
+                "company_code": {
+                    "type": "string",
+                    "description": "company registration number (e.g. EORI, SIRET)"
+                },
+                "vat_code": {
+                    "type": "string",
+                    "description": "company VAT number"
+                },
+                "email": {
+                    "type": "string",
+                    "descrption": "email address of the company or contact person"
+                },
+                "contact_person": {
+                    "type": "string",
+                    "description": "name of the contact person at the company"
+                },
+                "street_address": {
+                    "type": "string",
+                    "description": "specific street address"
+                },
+                "title": {
+                    "type": "string",
+                    "description": "name of person or business at the location"
+                },
+                "city": {
+                    "type": "string",
+                    "minLength": 2
+                },
+                "country": {
+                    "type": "string",
+                    "description": "ISO 3166-1 alpha-2 country code",
+                    "minLength": 2,
+                    "maxLength": 2
+                },
+                "postal_code": {
+                    "type": "string",
+                    "description": "postal / ZIP code (may start with country code)"
+                },
+                "comment": {
+                    "type": "string",
+                    "description": "references or other comments for this location"
+                }
+            }
+        },
+        "time_interval": {
+            "type": "object",
+            "properties": {
+                "datetime_from": {
+                    "type": "string",
+                    "description": "earliest datetime (start of time window) in ISO format for loading or unloading (assume midnight if no time provided)",
+                    "format": "date-time"
+                },
+                "datetime_to": {
+                    "type": "string",
+                    "description": "latest datetime (end of time window) in ISO format for loading or unloading",
+                    "format": "date-time"
+                }
+            },
+            "required": [
+                "datetime_from"
+            ]
+        }
+    }
+}
