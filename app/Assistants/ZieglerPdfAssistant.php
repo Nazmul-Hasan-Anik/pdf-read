@@ -26,6 +26,10 @@ class ZieglerPdfAssistant extends PdfClient
     {
         $text = implode("\n", $lines);
 
+        // ---------- Attachments (optional but useful)
+        $attachments = [];
+        if ($attachment_filename) $attachments[] = $attachment_filename;
+
         // ---------- Order ----------
         $reference = $this->matchOne($text, '/Ziegler\s*Ref\s*([^\r\n]+?)(?:\s+Rate\b|$)/i');
         if ($reference) $reference = trim(preg_replace('/\s+/', ' ', $reference));
@@ -35,6 +39,11 @@ class ZieglerPdfAssistant extends PdfClient
         $rateRaw  = $this->matchOne($text, '/\bRate\b\s*[€£$]?\s*([0-9\.,]+)/i');
         $amount   = $rateRaw !== null ? (float) str_replace(',', '', $rateRaw) : null;
         $currency = $this->detectCurrency($text) ?? 'EUR';
+
+        // ---------- Optional: Incoterms & Transport numbers if present
+        $incoterms = $this->matchOne($text, '/\b(Incoterms?)\b[:\s-]*([A-Z]{3})/i');
+        $incoterms = $incoterms ? strtoupper($incoterms) : null;
+        $transportNumbers = $this->matchOne($text, '/\b(?:Truck|Tract|Trailer)\s*[:\-]?\s*([^\r\n]+)/i');
 
         $stops = [];
         foreach ($this->splitBlocks($lines) as $b) {
@@ -104,6 +113,7 @@ class ZieglerPdfAssistant extends PdfClient
 
         // ---------- Compose final data (ALL required present) ----------
         $data = [
+            'attachment_filenames'  => $attachments,
             'customer'              => $customer,
             'loading_locations'     => $loading,
             'destination_locations' => $destination,
@@ -113,6 +123,9 @@ class ZieglerPdfAssistant extends PdfClient
             'freight_currency'      => $currency ?? 'EUR',
             'comment'               => $terms ? implode(' ', $terms) : ''
         ];
+
+        if ($incoterms)        $data['incoterms'] = $incoterms;
+        if ($transportNumbers) $data['transport_numbers'] = $transportNumbers;
 
         return $this->createOrder($data);
     }
