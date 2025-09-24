@@ -15,7 +15,13 @@ class TransalliancePdfAssistant extends PdfClient
 
     public function processLines(array $lines, ?string $attachment_filename = null)
     {
-        $text = implode("\n", $lines);
+        // Normalize non-breaking spaces and build text
+        $lines = array_map(function ($l) {
+            $l = preg_replace('/\p{Z}+/u', ' ', $l); // normalize all unicode spaces
+            return str_replace("\xC2\xA0", ' ', $l);
+        }, $lines);
+        $joined = implode("\n", $lines);
+        $text = preg_replace('/\p{Z}+/u', ' ', $joined);
 
         $attachments = [];
         if ($attachment_filename) $attachments[] = $attachment_filename;
@@ -111,10 +117,10 @@ class TransalliancePdfAssistant extends PdfClient
             $name = $this->getBlockCompanyName($b['lines']);
 
             $w = null;
-            if (preg_match('/(?:Total\s*weight|Weight|Poids)\s*[:\.]?\s*([\d\.,]+)/i', $blockText, $mw)) {
-                $w = (float) uncomma($mw[1]);
-            } elseif (preg_match('/\b([0-9][0-9\.,]{2,})\s*(?:KG|KGS)\b/i', $blockText, $mw)) {
-                $w = (float) uncomma($mw[1]);
+            if (preg_match('/(?:Total\s*weight|Weight|Poids)\b[\.:\s]*([\d\s\.,]+)/i', $blockText, $mw)) {
+                $w = $this->normalizeMoney($mw[1]);
+            } elseif (preg_match('/\b([0-9](?:[0-9\s\.,]{2,}))\s*(?:KG|KGS)\b/i', $blockText, $mw)) {
+                $w = $this->normalizeMoney($mw[1]);
             }
             if ($w !== null) { $weightTotal += $w; $anyWeight = true; }
 
@@ -150,7 +156,8 @@ class TransalliancePdfAssistant extends PdfClient
             } else {
                 $bon = (stripos($text, "BON D'ECHANGE") !== false);
                 if ($bon) {
-                    $notes = 'REF: ' . ($cargoNumber ?: ($reference ?: '')) . ". Instructions: ALL DRIVERS TO ASK FOR THE 'BON D'ECHANGE' FROM ALL DELIVERY SITES";
+                    $instr = $this->extractBonInstructionLine($lines);
+                    $notes = 'REF: ' . ($cargoNumber ?: ($reference ?: '')) . '. Instructions: ' . trim($instr);
                 }
             }
 
@@ -186,8 +193,47 @@ class TransalliancePdfAssistant extends PdfClient
             $cargo['weight'] = $weightTotal;
         } else {
             $globalW = null;
-            // capture forms like 25 000, 25.000, 25,000 KGS and plain 25000 KGS, with optional decimals
-            if (preg_match_all('/\b(\d{2}[\s\.,]?\d{3}|\d{5,6})(?:[\.,]00)?\b\s*(?:KG|KGS)?\b/i', $text, $mG)) {
+            // direct labeled fallback like "Weight . : 25000,000" on normalized text
+            if ($globalW === null) {
+                if (preg_match('/^\s*Weight\b[\s\.:]*([0-9][0-9\s\.,]*)/im', $text, $mWAny)) {
+                    $n = $this->normalizeMoney($mWAny[1]);
+                    if ($n > 0) $globalW = (int) round($n);
+                }
+            }
+            // same fallback on raw joined lines (before space normalization), in case alignment matters
+            if ($globalW === null) {
+                if (preg_match('/^\s*Weight\b[ \t\.:]*([0-9][0-9 \t\.,]*)/im', $joined, $mWRaw)) {
+                    $n = $this->normalizeMoney($mWRaw[1]);
+                    if ($n > 0) $globalW = (int) round($n);
+                }
+            }
+            // line-wise fallback: scan lines for a Weight label and grab the first big number on that line
+            if ($globalW === null) {
+                foreach ($lines as $ln) {
+                    if (stripos($ln, 'Weight') !== false) {
+                        if (preg_match('/([0-9][0-9\s\.,]{3,})/', $ln, $mx)) {
+                            $n = $this->normalizeMoney($mx[1]);
+                            if ($n > 0) { $globalW = (int) round($n); break; }
+                        }
+                    }
+                }
+            }
+            // neighborhood fallback: look at the next line after a Weight/Kgs label
+            if ($globalW === null) {
+                $nLines = count($lines);
+                for ($i = 0; $i < $nLines; $i++) {
+                    $cur = $lines[$i] ?? '';
+                    if (stripos($cur, 'Weight') !== false || stripos($cur, 'Kgs') !== false) {
+                        $window = trim(($lines[$i] ?? '') . ' ' . ($lines[$i+1] ?? ''));
+                        if (preg_match('/([0-9][0-9\s\.,]{3,})/', $window, $mm)) {
+                            $n = $this->normalizeMoney($mm[1]);
+                            if ($n > 0) { $globalW = (int) round($n); break; }
+                        }
+                    }
+                }
+            }
+            // capture forms like 25 000, 25.000, 25,000 KGS and plain 25000 KGS, with optional 1-3 decimals
+            if (preg_match_all('/\b(\d{2}[\s\.,]?\d{3}|\d{5,6})(?:[\.,]\d{1,3})?\b\s*(?:KG|KGS)?\b/i', $text, $mG)) {
                 $nums = [];
                 foreach ($mG[1] as $raw) {
                     $n = (int) preg_replace('/[^\d]/', '', $raw);
@@ -195,11 +241,36 @@ class TransalliancePdfAssistant extends PdfClient
                 }
                 if (!empty($nums)) $globalW = max($nums);
             }
+            // additional robust thousands-group pattern like 25 000, 125 500 etc.
+            if ($globalW === null) {
+                if (preg_match_all('/\b(\d{1,3}(?:[\s\x{00A0}\.\,]\d{3})+)(?:[\.,]\d+)?\s*(?:KG|KGS)?\b/u', $text, $mG2)) {
+                    $nums = [];
+                    foreach ($mG2[1] as $raw) {
+                        $n = (int) preg_replace('/[^\d]/', '', $raw);
+                        if ($n > 0) $nums[] = $n;
+                    }
+                    if (!empty($nums)) $globalW = max($nums);
+                }
+            }
+            // detect tons and convert to kg if still not found
+            if ($globalW === null) {
+                if (preg_match_all('/\b(\d{1,3}(?:[\.,]\d+)?|\d{2}(?:[\s\x{00A0}\u202F]\d{3})+)\s*(?:T|TONS?|TONNES?)\b/ui', $text, $mTon)) {
+                    $vals = [];
+                    foreach ($mTon[1] as $raw) {
+                        // if grouped like 25 000 with T (rare), treat as kg; else numeric tons * 1000
+                        if (preg_match('/\d{1,3}(?:[\s\x{00A0}\u202F]\d{3})+/', $raw)) {
+                            $kg = (int) preg_replace('/[^\d]/', '', $raw);
+                        } else {
+                            $num = (float) str_replace(',', '.', preg_replace('/[^\d\.,]/', '', $raw));
+                            $kg = (int) round($num * 1000);
+                        }
+                        if ($kg > 0) $vals[] = $kg;
+                    }
+                    if (!empty($vals)) $globalW = max($vals);
+                }
+            }
             if ($globalW !== null && $globalW >= 1000) {
                 $cargo['weight'] = (float) $globalW;
-            } elseif (($type === 'FTL' || ($ldm !== null && $ldm >= 13.0)) && ($cargoTitle === 'PACKAGING')) {
-                // sensible fallback for this format
-                $cargo['weight'] = 25000.0;
             }
         }
 
@@ -242,13 +313,14 @@ class TransalliancePdfAssistant extends PdfClient
 
         // Global comment: prefer the long commercial sender paragraph if present
         $comment = '';
-        if (preg_match('/Commercial\s+sender[\s\S]*?non\s*[- ]?compliance\./i', $text) || stripos($text, 'TRANSALLIANCE TS LTD') !== false) {
-            // Force the exact desired phrasing
-            $comment = "Commercial sender (service provider): TRANSALLIANCE TS LTD. Document must be returned signed 'Agreed to' with commercial stamp and company register. Returnable pallets must be exchanged at departure; penalties may apply for non-compliance.";
-        }
-        if ($comment === '' && ($type === 'FTL' || $ldm !== null)) {
-            // still prefer instructions/payment terms if nothing else
-            $comment = $this->collectGlobalComment($text);
+        // Prefer key instruction sentences if present
+        $comment = $this->extractKeyInstructionComment($text);
+        if ($comment === '') {
+            if (preg_match('/Commercial\s+sender[\s\S]*?non\s*[- ]?compliance\./i', $text, $mCom)) {
+                $comment = trim(preg_replace('/\s+/', ' ', $mCom[0]));
+            } else {
+                $comment = $this->collectGlobalComment($text);
+            }
         }
 
         $data = [
@@ -413,6 +485,44 @@ class TransalliancePdfAssistant extends PdfClient
     private function matchOne(string $text, string $pattern): ?string
     { return preg_match($pattern, $text, $m) ? trim($m[1]) : null; }
 
+    private function extractBonInstructionLine(array $lines): ?string
+    {
+        $n = count($lines);
+        for ($i = 0; $i < $n; $i++) {
+            if (stripos($lines[$i], "BON D'ECHANGE") !== false) {
+                $acc = trim($lines[$i]);
+                // Concatenate immediate next line if it likely continues the sentence
+                if ($i + 1 < $n) {
+                    $next = trim($lines[$i + 1]);
+                    if ($next !== '' && !preg_match('/^(Loading|Delivery)\b/i', $next)) {
+                        $acc = rtrim($acc, " ") . ' ' . $next;
+                    }
+                }
+                // Try to capture preceding part if this line starts mid-sentence
+                $prependParts = [];
+                for ($k = 1; $k <= 3; $k++) {
+                    if ($i - $k < 0) break;
+                    $prev = trim($lines[$i - $k]);
+                    if ($prev === '' || preg_match('/^(Loading|Delivery)\b/i', $prev)) break;
+                    if (preg_match('/^[_\s\-\.:]+$/', $prev)) continue; // skip underline/separator lines
+                    array_unshift($prependParts, $prev);
+                }
+                if (!empty($prependParts)) {
+                    $prefix = implode(' ', $prependParts);
+                    $acc = rtrim($prefix) . ' ' . ltrim($acc);
+                }
+                // Do not force-merge tokens; keep PDF text as-is to match expected
+                // Clean duplicate spaces
+                $acc = preg_replace('/\s+/', ' ', $acc);
+                // Remove leading markers like "Instructions:" or lone underscores
+                $acc = preg_replace('/^[_\s-]*Instructions\s*:\s*/i', '', $acc);
+                $acc = ltrim($acc, '_- ');
+                return trim($acc);
+            }
+        }
+        return null;
+    }
+
     private function firstDate(string $text): ?string
     {
         if (preg_match('/\b(\d{2})\/(\d{2})\/(\d{2,4})\b/', $text, $m)) {
@@ -442,5 +552,36 @@ class TransalliancePdfAssistant extends PdfClient
         elseif (strpos($v, ',') !== false) { $v = str_replace(',', '.', $v); }
         $v = preg_replace('/[^0-9.\-]/', '', $v);
         return is_numeric($v) ? (float) $v : 0.0;
+    }
+
+    private function extractKeyInstructionComment(string $text): string
+    {
+        // Normalize whitespace for sentence extraction but keep quotes as-is
+        $norm = preg_replace('/[\x{00A0}\x{202F}\s]+/u', ' ', $text);
+        $sentences = [];
+
+        // Capture sentences containing these key phrases
+        $patterns = [
+            // signed + Agreed to + stamp + register
+            '/([^\.]*?must\s+be\s+returned\s+signed[^\.]*Agreed\s*to[^\.]*?(?:\.|$))/i',
+            // pallets exchange at departure
+            '/([^\.]*?Returnable\s+pallets[^\.]*?exchanged[^\.]*?departure\s+point[^\.]*?(?:\.|$))/i',
+            // failure to comply penalties
+            '/([^\.]*?Failure\s+to\s+comply[^\.]*?penalt(?:y|ies)[^\.]*?(?:\.|$))/i',
+        ];
+        foreach ($patterns as $p) {
+            if ($norm !== null && preg_match($p, $norm, $m)) {
+                $sentences[] = trim($m[1]);
+            }
+        }
+        if (!empty($sentences)) {
+            // Ensure trailing periods
+            $sentences = array_map(function ($s) {
+                $s = rtrim($s);
+                return rtrim($s, '.') . '.';
+            }, $sentences);
+            return implode(' ', $sentences);
+        }
+        return '';
     }
 }
