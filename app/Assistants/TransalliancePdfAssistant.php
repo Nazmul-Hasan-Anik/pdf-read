@@ -77,8 +77,7 @@ class TransalliancePdfAssistant extends PdfClient
         }
 
         // Cargo fields
-        $cargoTitle = (stripos($text, 'PACKAGING') !== false) ? 'PACKAGING'
-            : ($this->matchOne($text, '/(?:M\.?\s*nature|nature of goods|goods)\s*[:\-]?\s*([^\r\n]+)/i') ?: 'General cargo');
+        $cargoTitle = $this->matchOne($text, '/(?:M\.?\s*nature|nature of goods|goods)\s*[:\-]?\s*([^\r\n]+)/i') ?: null;
 
         // Pallets
         $pallets = 0;
@@ -126,23 +125,7 @@ class TransalliancePdfAssistant extends PdfClient
 
             $addr = $this->guessAddressLines($b['lines']);
 
-            // Specialize known pickup address DP WORLD...
-            if ($typeStop === 'pickup' && $name && stripos($name, 'DP WORLD LONDON GATEWAY PORT') !== false) {
-                $addr['full'] = '1 LONDON GATEWAY';
-                $addr['postal'] = 'SS17 9DY';
-                $addr['city'] = 'CORRINGHAM, STANFORD';
-                $addr['country'] = 'GB';
-            }
 
-            // Clean destination TOKYO line
-            if (($typeStop === 'delivery') && !empty($addr['full'])) {
-                if (preg_match('/ZI\s+DISTRIPORT\s*,?\s*2\s+RUE\s+DE\s+TOKYO/i', $addr['full'])) {
-                    $addr['full'] = 'ZI DISTRIPORT 2 RUE DE TOKYO';
-                    $addr['postal'] = '13230';
-                    $addr['city'] = 'PORT-SAINT-LOUIS-DU-RHONE';
-                    $addr['country'] = 'FR';
-                }
-            }
 
             // Per-stop comments from global phrases
             $notes = null;
@@ -284,14 +267,8 @@ class TransalliancePdfAssistant extends PdfClient
         if (preg_match('/\b([A-Z]{2}\d{9,12})\b/', $text, $mVat)) {
             $customerDetails['vat_code'] = $mVat[1];
         }
-        // Prefer exact Rogiu G. 2 - VILNIUS... pattern (accept VILNIUS/VILNIAUS, any hyphen spacing)
-        if (preg_match('/ROGIU\s*G\.?\s*2\s*[-–]\s*VILNIA?US\s*M\.?\s*VILNIA?US\s*M\.?\s*SAV/i', $text)) {
-            $customerDetails['street_address'] = 'Rogiu G. 2 - VILNIUS M. VILNIUS M. SAV';
-        } elseif (preg_match('/ROGIU\s*G\.?\s*\d+[^\r\n]*/i', $text, $mSt)) {
+        if (preg_match('/ROGIU\s*G\.?\s*\d+[^\r\n]*/i', $text, $mSt)) {
             $customerDetails['street_address'] = trim($mSt[0]);
-        } elseif (!empty($customerDetails['vat_code']) && strtoupper(substr($customerDetails['vat_code'],0,2)) === 'LT' && stripos($text, 'VILNIUS') !== false) {
-            // Final fallback based on LT VAT and city mention
-            $customerDetails['street_address'] = 'Rogiu G. 2 - VILNIUS M. VILNIUS M. SAV';
         }
         // City and postal for LT
         if (preg_match('/\b0\d{4}\b/', $text, $mZip)) {
@@ -304,10 +281,6 @@ class TransalliancePdfAssistant extends PdfClient
             $customerDetails['country'] = 'LT';
         }
 
-        // Fallback name if not found
-        if (empty($customerDetails['company'])) {
-            $customerDetails['company'] = 'Transalliance TS Ltd';
-        }
 
         $customer = [ 'side' => 'receiver', 'details' => $customerDetails ];
 
